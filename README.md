@@ -25,11 +25,6 @@ A Telegram bot that helps users track the online status of players on a Minecraf
 3. Click the 'Online' button to see the current players online on the server.
 4. Click the 'Subscription' button to subscribe/unsubscribe from notifications about player activity.
 
-## How to Run the Bot Locally
-
-1. Clone this repository to your local machine.
-2. Create a `.env` file in the root directory and add your bot token and server API URL:
-
 ---
 
 Made with ❤️ by Danylo Samedov
