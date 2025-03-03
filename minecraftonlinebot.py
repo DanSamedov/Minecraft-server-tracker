@@ -1,53 +1,59 @@
 import logging
 import requests
+import os
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, filters, MessageHandler
+from dotenv import load_dotenv
 
+# Load environment variables
+load_dotenv()
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+SERVER_API = os.getenv("SERVER_API")
+
+# Configure logging
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
-
 logger = logging.getLogger(__name__)
 
-
-reply_keyboard = [
-    ["Online"],
-    ["Subscription"]
-]
+# Reply keyboard for the bot
+reply_keyboard = [["Online"], ["Subscription"]]
 markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
 
+# Using a set for fast lookup of subscribed users
+subscribed_users = set()
 
+# Load the subscribed users from file at startup
+def load_subscribed_users():
+    try:
+        with open("userslist.txt", "r") as file:
+            for line in file:
+                subscribed_users.update(map(int, line.split()))
+    except Exception as e:
+        logger.error(f"Error loading users from file: {e}")
+
+load_subscribed_users()
+
+# Players and temporary players to track server state
 players = []
-subscribed_users = []
+temporary_players = []
 
-
-with open("userslist.txt", "r") as file:
-    for line in file:
-        words = line.split()
-
-        for word in words:
-            if word not in subscribed_users:
-                subscribed_users.append(int(word))
-
-
+# Function to fetch player data from the server API
 async def api_func():
-    global players
-    global temporary_players
-
-    x = requests.get("https://4c6b-91-218-194-203.ngrok-free.app/status/java/149.255.33.162:50651")
-    y = x.json()
-
-    a = y["players"]["list"]
+    global players, temporary_players
+    try:
+        response = requests.get(SERVER_API)
+        response.raise_for_status()
+        data = response.json()
+        player_data = data.get("players", {}).get("list", [])
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching data from the server API: {e}")
+        return
 
     temporary_players = list(players)
-    players = []
+    players = [player["name_clean"] for player in player_data]
 
-    for i in a:
-        players.append(i["name_clean"])
-
-
+# Start command handler
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     await update.message.reply_html(
@@ -55,69 +61,77 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup=markup,
     )
 
-
+# Help command handler
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("To see current server online once use button 'Online'. " 
-                                    "To get notification when someone connect or "
-                                    "disconnect from the server, "
-                                    "click on the 'Subscribe' button.")
+    await update.message.reply_text(
+        "To see current server online once use button 'Online'. "
+        "To get notification when someone connects or disconnects from the server, "
+        "click on the 'Subscribe' button."
+    )
 
-
+# Active players handler
 async def active_players(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await api_func()
 
     players_online = ", ".join(players)
-    if players_online != "":
-        await update.message.reply_text(f"Players online: {players_online}\n"
-                                        f"Players quantity: {len(players)}")
-    else: 
+    if players_online:
+        await update.message.reply_text(f"Players online: {players_online}\nPlayers quantity: {len(players)}")
+    else:
         await update.message.reply_text("No one is online")
 
-
-async def players_activity(context: ContextTypes.DEFAULT_TYPE) -> None:    
+# Periodic check for player activity (connected/disconnected players)
+async def players_activity(context: ContextTypes.DEFAULT_TYPE) -> None:
     await api_func()
     text = ''
 
-    if list(set(players) - set(temporary_players)) != []:
-        player_conn = list(set(players) - set(temporary_players))
-        player_conn_str = ", ".join(player_conn)
-        text = (f"{player_conn_str} connected")
-    
+    # Players who connected
+    player_conn = set(players).difference(set(temporary_players))
+    if player_conn:
+        text = f"{', '.join(player_conn)} connected"
 
-    elif list(set(temporary_players) - set(players)) != []:
-        player_disconn = list(set(temporary_players) - set(players))
-        player_diconn_str = ", ".join(player_disconn)
-        text = (f"{player_diconn_str} left")
-    
-    if text != '':
-        for i in subscribed_users:    
-            await context.bot.send_message(i, text)
+    # Players who disconnected
+    player_disconn = set(temporary_players).difference(set(players))
+    if player_disconn:
+        text = f"{', '.join(player_disconn)} left"
+
+    if text:
+        for user_id in subscribed_users:
+            try:
+                await context.bot.send_message(user_id, text)
+            except Exception as e:
+                logger.error(f"Failed to send message to {user_id}: {e}")
 
 
+# Subscription handler
 async def subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_message.chat_id
-    global subscribed_users
 
     if chat_id not in subscribed_users:
-        subscribed_users.append(chat_id)
-        chat_id_str = str(chat_id)
-        with open("userslist.txt", "a") as file:
-            file.write(' ' + chat_id_str)
-        await update.message.reply_text('You are subscribed')   
+        subscribed_users.add(chat_id)
+        logger.info(f"User {chat_id} subscribed.")
+        update_user_list()
+        await update.message.reply_text('You are subscribed')
     else:
         subscribed_users.remove(chat_id)
-        subscribed_users_str = " "
-        subscribed_users_str = subscribed_users_str.join(str(x) for x in subscribed_users)
-        with open("userslist.txt", "w") as file:
-            file.write(subscribed_users_str)
-        await update.message.reply_text('You are unsubscribed')   
+        logger.info(f"User {chat_id} unsubscribed.")
+        update_user_list()
+        await update.message.reply_text('You are unsubscribed')
 
+# Helper function to update the subscription list in the file
+def update_user_list():
+    try:
+        with open("userslist.txt", "w") as file:
+            file.write(" ".join(str(x) for x in subscribed_users))
+    except Exception as e:
+        logger.error(f"Error writing to userslist.txt: {e}")
 
 def main() -> None:
-    application = Application.builder().token("6546676822:AAHhTVF6nb3mJ1nDAgDNRgTF3an_EZouc2o").build()
-        
-    application.job_queue.run_repeating(players_activity, 3, name='subscription')
-    
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    # Run periodic job to check player activity
+    application.job_queue.run_repeating(players_activity, interval=3, first=0, name='subscription')
+
+    # Add handlers for commands and messages
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("online", active_players))
@@ -127,7 +141,6 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.Regex("Subscription"), subscription))
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == "__main__":
     main()
